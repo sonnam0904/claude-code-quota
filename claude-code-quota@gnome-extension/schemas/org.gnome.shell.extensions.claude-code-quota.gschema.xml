@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.claude-code-quota" path="/org/gnome/shell/extensions/claude-code-quota/">
+    <!-- data -->
+    <key name="refresh-interval" type="i">
+      <range min="30" max="3600"/>
+      <default>60</default>
+      <summary>Refresh interval in seconds</summary>
+    </key>
+    <key name="command-timeout" type="i">
+      <range min="5" max="300"/>
+      <default>60</default>
+      <summary>Timeout for each claude command in seconds</summary>
+    </key>
+    <key name="claude-path" type="s">
+      <default>''</default>
+      <summary>Path to the claude binary (empty = auto-detect)</summary>
+    </key>
+    <key name="hidden-profiles" type="as">
+      <default>[]</default>
+      <summary>Profile names that are not queried</summary>
+    </key>
+    <key name="extra-profiles" type="as">
+      <default>[]</default>
+      <summary>Additional profiles as name=config-dir</summary>
+    </key>
+    <key name="language" type="s">
+      <choices><choice value="auto"/><choice value="en"/><choice value="vi"/></choices>
+      <default>'auto'</default>
+      <summary>UI language</summary>
+    </key>
+    <key name="terminal" type="s">
+      <default>''</default>
+      <summary>Terminal command prefix (empty = auto-detect)</summary>
+    </key>
+
+    <!-- appearance -->
+    <key name="panel-mode" type="s">
+      <choices><choice value="text"/><choice value="ring"/><choice value="both"/></choices>
+      <default>'both'</default>
+      <summary>Panel display style</summary>
+    </key>
+    <key name="panel-show-weekly" type="b">
+      <default>true</default>
+      <summary>Show weekly percentage on the panel</summary>
+    </key>
+    <key name="panel-profile" type="s">
+      <default>''</default>
+      <summary>Only show this profile on the panel (empty = all)</summary>
+    </key>
+    <key name="panel-position" type="s">
+      <choices><choice value="left"/><choice value="center"/><choice value="right"/></choices>
+      <default>'right'</default>
+      <summary>Position in the top panel</summary>
+    </key>
+    <key name="warn-level" type="i">
+      <range min="1" max="100"/>
+      <default>50</default>
+      <summary>Percentage at which the color turns yellow</summary>
+    </key>
+    <key name="crit-level" type="i">
+      <range min="1" max="100"/>
+      <default>80</default>
+      <summary>Percentage at which the color turns red</summary>
+    </key>
+    <key name="chart-hours" type="i">
+      <range min="1" max="192"/>
+      <default>24</default>
+      <summary>Range of the history chart in hours</summary>
+    </key>
+
+    <!-- notifications -->
+    <key name="notify-enabled" type="b">
+      <default>true</default>
+      <summary>Enable notifications</summary>
+    </key>
+    <key name="notify-thresholds" type="s">
+      <default>'80, 95'</default>
+      <summary>Percent thresholds that trigger a notification</summary>
+    </key>
+    <key name="notify-reset" type="b">
+      <default>true</default>
+      <summary>Notify when a limit resets</summary>
+    </key>
+    <key name="notify-forecast" type="b">
+      <default>true</default>
+      <summary>Notify when the burn rate predicts exhaustion before reset</summary>
+    </key>
+  </schema>
+</schemalist>

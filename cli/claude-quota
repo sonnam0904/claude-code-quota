@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""claude-quota — print Claude Code usage limits for status bars.
+
+Reads `claude -p /usage --output-format json` (a local command, costs no tokens)
+for every Claude Code profile and prints it in a format suitable for
+Waybar, Polybar, i3blocks, XFCE Genmon, KDE "Command Output" widgets or plain text.
+
+Examples:
+  claude-quota                       # human readable
+  claude-quota --format waybar       # JSON for a Waybar custom module
+  claude-quota --format genmon       # XFCE Generic Monitor
+  claude-quota --format json         # machine readable
+  claude-quota --profile bizfly      # only one profile
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as cf
+import datetime as dt
+import glob
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "claude-code-quota"
+CACHE_FILE = CACHE_DIR / "cli-cache.json"
+
+MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
+
+LINE_RE = re.compile(
+    r"^\s*([A-Za-z][^:：%]{1,60}?)\s*[:：]\s*(\d+(?:[.,]\d+)?)\s*%(?:\s*(?:used|utilized|consumed))?"
+    r"(?:\s*[·•|,–-]?\s*resets?\s*(.+?))?\s*$",
+    re.I,
+)
+LIMIT_WORDS = re.compile(r"session|week|day|month|limit|opus|sonnet|fable|haiku|model", re.I)
+
+T = {
+    "en": {"session": "Session (5h)", "week_all": "Week (all models)", "week": "Week ({})",
+           "resets_in": "resets in {} ({})", "error": "error"},
+    "vi": {"session": "Session (5h)", "week_all": "Tuần (tất cả)", "week": "Tuần ({})",
+           "resets_in": "reset sau {} ({})", "error": "lỗi"},
+}
+
+
+# ---------------------------------------------------------------- parsing (mirrors lib/parse.js)
+
+def limit_key(raw: str) -> str:
+    n = raw.lower()
+    if "session" in n:
+        return "session"
+    m = re.search(r"week\w*\s*\((.+)\)", n)
+    if m:
+        return "week_all" if "all" in m.group(1) else "week_" + re.sub(r"\W+", "_", m.group(1).strip())
+    if "week" in n:
+        return "week_all"
+    return re.sub(r"\W+", "_", n)
+
+
+def parse_reset(text: str | None, now: dt.datetime) -> dt.datetime | None:
+    if not text:
+        return None
+    clean = re.sub(r"\s*\(.*?\)\s*$", "", text).strip()
+    clean = re.sub(r"^(at|on)\s+", "", clean, flags=re.I)
+    rel = re.match(r"^(?:in\s+)?(?:(\d+)\s*d(?:ays?)?)?\s*(?:(\d+)\s*h(?:(?:ou)?rs?)?)?\s*"
+                   r"(?:(\d+)\s*m(?:in(?:ute)?s?)?)?$", clean, re.I)
+    if rel and any(rel.groups()):
+        d, h, m = (int(x or 0) for x in rel.groups())
+        return now + dt.timedelta(days=d, hours=h, minutes=m)
+    m = re.match(r"^(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s*(?:(\d{4}),?\s*)?(?:at\s+)?)?"
+                 r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", clean, re.I)
+    if not m:
+        return None
+    mon, day, year, hour, minute, ampm = m.groups()
+    hour, minute = int(hour), int(minute or 0)
+    if ampm:
+        hour = hour % 12 + (12 if ampm.lower() == "pm" else 0)
+    elif minute == 0 and m.group(5) is None:
+        return None
+    if hour > 23 or minute > 59:
+        return None
+    try:
+        if mon:
+            month = MONTHS.get(mon.lower())
+            if not month:
+                return None
+            res = now.replace(year=int(year) if year else now.year, month=month, day=int(day),
+                              hour=hour, minute=minute, second=0, microsecond=0)
+            if not year and res < now - dt.timedelta(days=180):
+                res = res.replace(year=res.year + 1)
+        else:
+            res = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if res < now:
+                res += dt.timedelta(days=1)
+    except ValueError:
+        return None
+    return res
+
+
+def parse_usage(text: str, now: dt.datetime) -> list[dict]:
+    out, seen = [], set()
+    for line in text.splitlines():
+        m = LINE_RE.match(line)
+        if not m or not LIMIT_WORDS.search(m.group(1)):
+            continue
+        raw = m.group(1).strip()
+        key = limit_key(raw)
+        if key in seen:
+            continue
+        seen.add(key)
+        reset = parse_reset(m.group(3), now)
+        out.append({
+            "name": raw,
+            "key": key,
+            "percent": float(m.group(2).replace(",", ".")),
+            "reset_text": re.sub(r"\s*\(.*?\)\s*$", "", m.group(3) or "").strip(),
+            "resets_at": reset.isoformat() if reset else None,
+        })
+    return out
+
+
+def parse_json(text: str) -> dict:
+    i, j = text.find("{"), text.rfind("}")
+    if i < 0 or j < i:
+        raise ValueError((text.strip().splitlines() or ["empty output"])[0])
+    return json.loads(text[i:j + 1])
+
+
+# ---------------------------------------------------------------- discovery
+
+def find_claude(explicit: str | None) -> str | None:
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    p = shutil.which("claude")
+    if p:
+        return p
+    cands = [HOME / ".local/bin/claude", HOME / ".claude/local/claude", HOME / ".npm-global/bin/claude",
+             HOME / ".bun/bin/claude", HOME / ".volta/bin/claude", Path("/usr/local/bin/claude"),
+             Path("/usr/bin/claude"), Path("/opt/claude-code/bin/claude")]
+    def ver(p: str):
+        return [int(x) for x in re.findall(r"\d+", p.split("/node/")[-1].split("/")[0])]
+    cands += [Path(p) for p in sorted(glob.glob(str(HOME / ".nvm/versions/node/*/bin/claude")), key=ver, reverse=True)]
+    return next((str(c) for c in cands if c.exists()), None)
+
+
+def detect_profiles(extra: list[str]) -> list[dict]:
+    profs = []
+    root = HOME / ".claude-profiles"
+    if root.is_dir():
+        profs += [{"name": d.name, "dir": str(d)} for d in sorted(root.iterdir()) if d.is_dir()]
+    if (HOME / ".claude").is_dir():
+        profs.append({"name": "default", "dir": None})
+    for e in extra:
+        name, _, d = e.partition("=") if "=" in e else (Path(e).name, "", e)
+        d = os.path.expanduser(d.strip())
+        if os.path.isdir(d) and all(p["dir"] != d for p in profs):
+            profs.append({"name": name.strip(), "dir": d})
+    return profs
+
+
+def run_claude(claude: str, args: list[str], config_dir: str | None, timeout: int) -> str:
+    env = dict(os.environ, NO_COLOR="1")
+    env["PATH"] = f"{os.path.dirname(claude)}:{env.get('PATH', '/usr/bin:/bin')}"
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    else:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    r = subprocess.run([claude, *args], env=env, cwd="/tmp", capture_output=True, text=True,
+                       timeout=timeout, start_new_session=True)
+    return r.stdout or r.stderr
+
+
+def fetch(claude: str, profiles: list[dict], timeout: int) -> list[dict]:
+    now = dt.datetime.now().astimezone()
+
+    def auth(p):
+        try:
+            return parse_json(run_claude(claude, ["auth", "status"], p["dir"], timeout))
+        except Exception:
+            return None
+
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        auths = list(ex.map(auth, profiles))
+
+    accounts, seen = [], set()
+    for p, a in zip(profiles, auths):
+        if a and a.get("loggedIn") is False:
+            continue
+        ident = f"{a.get('email')}|{a.get('orgId', '')}" if a and a.get("email") else f"dir:{p['dir']}"
+        if ident in seen:
+            continue
+        seen.add(ident)
+        accounts.append({**p, "email": (a or {}).get("email"), "plan": (a or {}).get("subscriptionType")})
+
+    def usage(acc):
+        try:
+            j = parse_json(run_claude(claude, ["-p", "/usage", "--output-format", "json",
+                                               "--no-session-persistence"], acc["dir"], timeout))
+            text = str(j.get("result", ""))
+            if j.get("is_error"):
+                raise ValueError(text or "error")
+            limits = parse_usage(text, now)
+            if not limits:
+                raise ValueError(next((l.strip() for l in text.splitlines() if l.strip()), "could not read quota"))
+            return {**acc, "limits": limits, "error": None}
+        except subprocess.TimeoutExpired:
+            return {**acc, "limits": [], "error": f"timeout after {timeout}s"}
+        except Exception as e:  # noqa: BLE001
+            return {**acc, "limits": [], "error": str(e)}
+
+    with cf.ThreadPoolExecutor(max_workers=8) as ex:
+        return list(ex.map(usage, accounts))
+
+
+# ---------------------------------------------------------------- output
+
+def fmt_duration(seconds: float) -> str:
+    mins = max(0, round(seconds / 60))
+    d, mins = divmod(mins, 1440)
+    h, m = divmod(mins, 60)
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h{m:02d}m"
+    return f"{m}m"
+
+
+def label(limit: dict, t: dict) -> str:
+    if limit["key"] == "session":
+        return t["session"]
+    if limit["key"] == "week_all":
+        return t["week_all"]
+    m = re.search(r"\(([^)]+)\)", limit["name"])
+    return t["week"].format(m.group(1)) if m else limit["name"]
+
+
+def reset_str(limit: dict, t: dict) -> str:
+    if limit["resets_at"]:
+        at = dt.datetime.fromisoformat(limit["resets_at"])
+        now = dt.datetime.now().astimezone()
+        clock = at.strftime("%H:%M") if at.date() == now.date() else at.strftime("%H:%M %d/%m")
+        return t["resets_in"].format(fmt_duration((at - now).total_seconds()), clock)
+    return limit["reset_text"]
+
+
+def level(p: float, warn: int, crit: int) -> str:
+    return "critical" if p >= crit else "warning" if p >= warn else "normal"
+
+
+def short(accs: list[dict], weekly: bool) -> str:
+    parts = []
+    for a in accs:
+        lim = {l["key"]: l for l in a["limits"]}
+        s, w = lim.get("session"), lim.get("week_all")
+        if a["error"] or not s:
+            txt = "!"
+        else:
+            txt = f"{round(s['percent'])}%" + (f"·{round(w['percent'])}%" if weekly and w else "")
+        parts.append(f"{a['name'][:1].upper()} {txt}" if len(accs) > 1 else txt)
+    return "✳ " + "  ".join(parts)
+
+
+def long(accs: list[dict], t: dict) -> str:
+    lines = []
+    for a in accs:
+        head = a["name"] + (f" — {a['email']}" if a.get("email") else "") + (f" · {a['plan']}" if a.get("plan") else "")
+        lines.append(head)
+        if a["error"]:
+            lines.append(f"  ⚠ {a['error']}")
+        for l in a["limits"]:
+            filled = round(min(100, l["percent"]) / 10)
+            lines.append(f"  {label(l, t):<17} {'█' * filled}{'░' * (10 - filled)} {round(l['percent']):>3}%  {reset_str(l, t)}")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("-f", "--format", default="text",
+                    choices=["text", "short", "json", "waybar", "polybar", "i3blocks", "genmon"])
+    ap.add_argument("-p", "--profile", action="append", default=[], help="only these profile names (repeatable)")
+    ap.add_argument("--extra-profile", action="append", default=[], help="additional NAME=CONFIG_DIR")
+    ap.add_argument("--claude", help="path to the claude binary")
+    ap.add_argument("--timeout", type=int, default=60)
+    ap.add_argument("--max-age", type=int, default=55,
+                    help="reuse cached result younger than N seconds (default 55, 0 = always fetch)")
+    ap.add_argument("--no-weekly", action="store_true", help="short output: only session %%")
+    ap.add_argument("--warn", type=int, default=50)
+    ap.add_argument("--crit", type=int, default=80)
+    ap.add_argument("--lang", choices=["auto", "en", "vi"], default="auto")
+    args = ap.parse_args()
+
+    lang = args.lang
+    if lang == "auto":
+        envlang = os.environ.get("LANGUAGE") or os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES") or os.environ.get("LANG", "")
+        lang = "vi" if envlang.startswith("vi") else "en"
+    t = T[lang]
+
+    cache_key = json.dumps([sorted(args.profile), args.extra_profile, args.claude])
+    accs = None
+    if args.max_age > 0 and CACHE_FILE.exists():
+        try:
+            c = json.loads(CACHE_FILE.read_text())
+            if c.get("key") == cache_key and time.time() - c["at"] < args.max_age:
+                accs = c["accounts"]
+        except Exception:  # noqa: BLE001
+            pass
+
+    if accs is None:
+        claude = find_claude(args.claude)
+        if not claude:
+            msg = "claude binary not found (use --claude PATH)"
+            print(json.dumps({"text": "✳ !", "tooltip": msg, "class": "critical"}) if args.format == "waybar" else msg)
+            return 1
+        profiles = detect_profiles(args.extra_profile)
+        if args.profile:
+            profiles = [p for p in profiles if p["name"] in args.profile]
+        accs = fetch(claude, profiles, args.timeout)
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            CACHE_FILE.write_text(json.dumps({"key": cache_key, "at": time.time(), "accounts": accs}))
+        except OSError:
+            pass
+
+    values = [l["percent"] for a in accs for l in a["limits"]]
+    top = max(values) if values else 0
+    cls = "critical" if any(a["error"] and not a["limits"] for a in accs) else level(top, args.warn, args.crit)
+    weekly = not args.no_weekly
+
+    if args.format == "json":
+        print(json.dumps({"accounts": accs, "max_percent": top}, ensure_ascii=False, indent=2))
+    elif args.format == "waybar":
+        print(json.dumps({"text": short(accs, weekly), "tooltip": long(accs, t), "class": cls,
+                          "percentage": round(top)}, ensure_ascii=False))
+    elif args.format == "polybar":
+        color = {"normal": "#8ae234", "warning": "#fcaf3e", "critical": "#ef2929"}[cls]
+        print(f"%{{F{color}}}{short(accs, weekly)}%{{F-}}")
+    elif args.format == "i3blocks":
+        color = {"normal": "#8ae234", "warning": "#fcaf3e", "critical": "#ef2929"}[cls]
+        print(short(accs, weekly))
+        print(short(accs, weekly))
+        print(color)
+    elif args.format == "genmon":
+        color = {"normal": "#8ae234", "warning": "#fcaf3e", "critical": "#ef2929"}[cls]
+        print(f"<txt><span foreground='{color}' weight='bold'>{html.escape(short(accs, weekly))}</span></txt>")
+        print(f"<tool>{html.escape(long(accs, t))}</tool>")
+        print("<txtclick>xdg-open https://claude.ai/settings/usage</txtclick>")
+    elif args.format == "short":
+        print(short(accs, weekly))
+    else:
+        print(long(accs, t))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

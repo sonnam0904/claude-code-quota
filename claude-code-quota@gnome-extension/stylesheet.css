@@ -1,0 +1,68 @@
+/* panel */
+.claude-quota-logo {
+  color: #d97757;
+  font-weight: bold;
+  margin-right: 4px;
+}
+.claude-quota-label {
+  font-weight: bold;
+  padding: 0 2px;
+}
+.claude-quota-group {
+  spacing: 4px;
+}
+.claude-quota-group-sep {
+  margin-left: 8px;
+}
+
+/* levels */
+.claude-quota-ok { color: #8ae234; }
+.claude-quota-warn { color: #fcaf3e; }
+.claude-quota-crit { color: #ef2929; }
+.claude-quota-muted { color: #999999; }
+
+/* menu */
+.claude-quota-header {
+  font-weight: bold;
+  margin-right: 8px;
+}
+.claude-quota-who {
+  margin-right: 8px;
+}
+.claude-quota-sub {
+  font-size: 0.85em;
+  color: #aaaaaa;
+}
+.claude-quota-limit-name {
+  min-width: 130px;
+  margin-right: 10px;
+}
+.claude-quota-pct {
+  min-width: 48px;
+  margin: 0 10px;
+  font-weight: bold;
+  font-size: 1.1em;
+  text-align: right;
+}
+.claude-quota-forecast {
+  font-size: 0.9em;
+  padding-left: 140px;
+}
+.claude-quota-legend {
+  margin-top: 6px;
+  spacing: 4px;
+}
+.claude-quota-legend-item {
+  font-size: 0.85em;
+  font-weight: bold;
+}
+.claude-quota-icon-button {
+  padding: 6px;
+  margin-left: 6px;
+  border-radius: 99px;
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.claude-quota-icon-button:hover,
+.claude-quota-icon-button:focus {
+  background-color: rgba(255, 255, 255, 0.15);
+}

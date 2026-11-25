@@ -1,0 +1,9 @@
+{
+  "uuid": "claude-code-quota@gnome-extension",
+  "name": "Claude Code Quota",
+  "description": "Show Claude Code usage limits (5-hour session and weekly) in the top panel, read from `claude -p /usage` (no tokens used). Rings and progress bars, burn-rate forecast, threshold and reset notifications, usage history chart, multiple profiles (CLAUDE_CONFIG_DIR), quick actions.\n\nRequires the Claude Code CLI to be installed and logged in.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "settings-schema": "org.gnome.shell.extensions.claude-code-quota",
+  "version": 2,
+  "url": ""
+}
